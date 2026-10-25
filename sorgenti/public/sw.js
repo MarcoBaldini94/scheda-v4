@@ -1,5 +1,5 @@
 /* Cambiare CACHE a ogni aggiornamento dei file */
-const CACHE = "scheda-v4-4.0.0";
+const CACHE = "scheda-v4-4.0.1";
 const ASSETS = ["./", "./index.html", "./app.js", "./styles.css", "./manifest.webmanifest",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/maskable-512.png"];
 
