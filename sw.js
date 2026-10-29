@@ -1,10 +1,12 @@
 /* Cambiare CACHE a ogni aggiornamento dei file */
-const CACHE = "scheda-v4-4.1.0";
+const CACHE = "scheda-v4-4.1.1";
 const ASSETS = ["./", "./index.html", "./app.js", "./styles.css", "./manifest.webmanifest",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/maskable-512.png"];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)));
+  // cache: "reload" scavalca la cache HTTP del browser (GitHub Pages: max-age=600):
+  // senza, il nuovo service worker puo' salvare la versione VECCHIA di app.js.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: "reload" })))));
 });
 
 self.addEventListener("activate", (e) => {
