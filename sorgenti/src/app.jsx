@@ -8,7 +8,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
  *  migrazione automatica dallo storico V3 sullo stesso dominio.
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = "4.0.0";
+const APP_VERSION = "4.1.0";
 const STORAGE_KEY = "schedaV4_sessions";
 const DRAFT_KEY = "schedaV4_draft";
 const BACKUP_KEY = "schedaV4_backups";
@@ -524,6 +524,94 @@ async function storageDiagnose() {
 
 /* --------------------------- EXPORT / IMPORT ------------------------ */
 
+
+/* -------------------- BACKUP AUTOMATICO SUL PC ---------------------- *
+ * Dopo ogni salvataggio l'archivio viene inviato all'Hub web app sul PC
+ * di casa (raggiunto via Tailscale), che lo scrive come file nuovo in una
+ * cartella OneDrive. L'indirizzo del PC e' condiviso con le altre web app
+ * dello stesso sito (chiave "hub-url"); lo stato e' solo di questa app.
+ * -------------------------------------------------------------------- */
+const HUB_APP = "scheda-v4";
+const HUB_URL_KEY = "hub-url";
+const HUB_STATE_KEY = "schedaV4_hubState";
+
+function lsGet(k) {
+  try {
+    return window.localStorage.getItem(k);
+  } catch (e) {
+    return null;
+  }
+}
+function lsSet(k, v) {
+  try {
+    window.localStorage.setItem(k, v);
+  } catch (e) {
+    /* non bloccante */
+  }
+}
+const cleanHubUrl = (v) => (v || "").trim().replace(/\/+$/, "");
+const readHubUrl = () => cleanHubUrl(lsGet(HUB_URL_KEY));
+function readHubState() {
+  try {
+    return JSON.parse(lsGet(HUB_STATE_KEY) || "{}") || {};
+  } catch (e) {
+    return {};
+  }
+}
+function writeHubState(patch) {
+  const next = { ...readHubState(), ...patch };
+  lsSet(HUB_STATE_KEY, JSON.stringify(next));
+  return next;
+}
+
+/** Niente data/ora nel contenuto: cosi' l'hub riconosce i backup identici. */
+const hubPayload = (sessions) => JSON.stringify({ app: HUB_APP, schema: SCHEMA_VERSION, sessions });
+
+async function sha256(str) {
+  try {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+    return [...new Uint8Array(buf)].map((x) => x.toString(16).padStart(2, "0")).join("");
+  } catch (e) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+    return "s" + h;
+  }
+}
+
+async function hubFetch(base, path, opt = {}) {
+  if (!base) throw new Error("indirizzo non impostato");
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), 12000);
+  try {
+    const r = await fetch(base + path, { signal: ctl.signal, cache: "no-store", ...opt });
+    let body = null;
+    try {
+      body = await r.json();
+    } catch (e) {
+      body = null;
+    }
+    if (!r.ok) throw new Error((body && body.errore) || "HTTP " + r.status);
+    return body;
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error("nessuna risposta dal PC");
+    if (e instanceof TypeError) throw new Error("PC non raggiungibile (Tailscale attivo sul telefono?)");
+    throw e;
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+function fmtWhen(iso) {
+  if (!iso) return "mai";
+  const d = new Date(iso);
+  const t = new Date();
+  const hm = d.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === t.toDateString()) return "oggi " + hm;
+  const y = new Date(t);
+  y.setDate(t.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return "ieri " + hm;
+  return d.toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit" }) + " " + hm;
+}
 
 function toMarkdown(sessions) {
   const sorted = [...sessions].sort((a, b) => b.date.localeCompare(a.date));
@@ -1177,6 +1265,153 @@ export default function SchedaV4() {
   const wakeRef = useRef(null);
   const lastPayloadRef = useRef(null);
 
+  /* ---------- backup automatico sul PC (hub via Tailscale) ---------- */
+  const [hubUrlInput, setHubUrlInput] = useState(() => readHubUrl());
+  const [hub, setHub] = useState(() => ({ url: readHubUrl(), ...readHubState(), busy: false, msg: null }));
+  const sessionsRef = useRef([]);
+  const hubBusyRef = useRef(false);
+  const hubAgainRef = useRef(false);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  const hubSync = useCallback(async (force = false, list = null) => {
+    const url = readHubUrl();
+    if (!url) return;
+    if (hubBusyRef.current) {
+      hubAgainRef.current = true; // un invio e' gia' in corso: si ripete subito dopo
+      return;
+    }
+    const data = list || sessionsRef.current;
+    if (!data.length && !force) return; // un archivio vuoto non si invia da solo
+    const payload = hubPayload(data);
+    const h = await sha256(payload);
+    if (!force && readHubState().lastHash === h) return; // il PC ha gia' questa versione
+    hubBusyRef.current = true;
+    setHub((s) => ({ ...s, url, busy: true, msg: "Invio del backup al PC…" }));
+    try {
+      const r = await hubFetch(url, `/api/${HUB_APP}/backup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+      });
+      const st = writeHubState({
+        lastHash: h,
+        lastOk: new Date().toISOString(),
+        lastErr: null,
+        lastFile: (r && r.file) || null,
+        lastCount: data.length,
+      });
+      setHub((s) => ({ ...s, ...st, busy: false, msg: r && r.salvato === false ? "Il PC aveva già questa versione." : null }));
+    } catch (e) {
+      const st = writeHubState({ lastErr: (e && e.message) || String(e), lastErrAt: new Date().toISOString() });
+      setHub((s) => ({ ...s, ...st, busy: false, msg: null }));
+    } finally {
+      hubBusyRef.current = false;
+      if (hubAgainRef.current) {
+        hubAgainRef.current = false;
+        setTimeout(() => hubSync(false), 500);
+      }
+    }
+  }, []);
+
+  // all'apertura, al ritorno in primo piano e quando torna la rete
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setTimeout(() => hubSync(false), 2000);
+    const onVis = () => document.visibilityState === "visible" && hubSync(false);
+    const onOnline = () => hubSync(false);
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("online", onOnline);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("online", onOnline);
+    };
+  }, [loaded, hubSync]);
+
+  const saveHubUrl = async () => {
+    const v = cleanHubUrl(hubUrlInput);
+    if (v && !/^https:\/\//i.test(v)) {
+      setHub((s) => ({ ...s, msg: "L'indirizzo deve iniziare con https://" }));
+      return;
+    }
+    lsSet(HUB_URL_KEY, v);
+    setHubUrlInput(v);
+    if (!v) {
+      setHub((s) => ({ ...s, url: "", msg: "Backup sul PC disattivato." }));
+      return;
+    }
+    setHub((s) => ({ ...s, url: v, busy: true, msg: "Provo il collegamento…" }));
+    try {
+      const r = await hubFetch(v, "/api/ping");
+      const known = Array.isArray(r && r.app) && r.app.includes(HUB_APP);
+      setHub((s) => ({
+        ...s,
+        busy: false,
+        msg: known
+          ? `Collegato a ${r.pc}. Invio il primo backup…`
+          : `Collegato a ${r.pc}, ma l'hub non conosce ancora "${HUB_APP}": aggiungila in hub_config.json e riavvia l'hub.`,
+      }));
+      if (known) await hubSync(true);
+    } catch (e) {
+      const st = writeHubState({ lastErr: e.message, lastErrAt: new Date().toISOString() });
+      setHub((s) => ({ ...s, ...st, busy: false, msg: "Collegamento non riuscito: " + e.message }));
+    }
+  };
+
+  const restoreFromPc = async () => {
+    const url = readHubUrl();
+    setHub((s) => ({ ...s, busy: true, msg: "Scarico l'ultimo backup dal PC…" }));
+    try {
+      const r = await hubFetch(url, `/api/${HUB_APP}/backup/ultimo`);
+      const d = r && r.dati;
+      const raw = Array.isArray(d) ? d : d && Array.isArray(d.sessions) ? d.sessions : null;
+      if (!raw) throw new Error("il file sul PC non contiene sessioni");
+      const incoming = raw.filter((x) => x && x.date && Array.isArray(x.exercises)).map(normalizeSession);
+      setHub((s) => ({ ...s, busy: false, msg: null }));
+      setConfirmBox({
+        title: "Recuperare il backup dal PC?",
+        body: `File ${r.file} con ${incoming.length} sessioni. Verrà unito all'archivio di questo telefono: le sessioni già presenti non vengono duplicate e niente viene cancellato.`,
+        confirmLabel: "Unisci",
+        onConfirm: async () => {
+          setConfirmBox(null);
+          const merged = mergeSessions(sessionsRef.current, incoming);
+          setSessions(merged.sessions);
+          const ok = await persist(merged.sessions);
+          setHub((s) => ({
+            ...s,
+            msg: ok
+              ? `Recupero completato: ${merged.added} sessioni aggiunte, ${merged.replaced} aggiornate.`
+              : "Recupero caricato ma NON salvato sul telefono: usa il riquadro di recupero.",
+          }));
+        },
+      });
+    } catch (e) {
+      setHub((s) => ({ ...s, busy: false, msg: "Recupero non riuscito: " + e.message }));
+    }
+  };
+
+  const hubFailing = !!(hub.lastErr && (!hub.lastOk || (hub.lastErrAt || "") > hub.lastOk));
+  const hubTone = !hub.url ? "neutral" : hub.busy ? "teal" : hubFailing ? "amber" : hub.lastOk ? "green" : "neutral";
+  const hubLabel = !hub.url
+    ? "non attivo"
+    : hub.busy
+    ? "invio…"
+    : hubFailing
+    ? "PC non raggiungibile"
+    : hub.lastOk
+    ? "ultimo: " + fmtWhen(hub.lastOk)
+    : "in attesa";
+  const hubStatusText =
+    hub.msg != null
+      ? hub.msg
+      : !hub.url
+      ? "Inserisci l'indirizzo del PC e premi Salva e prova."
+      : `Ultimo backup riuscito: ${fmtWhen(hub.lastOk)}${hub.lastCount != null && hub.lastOk ? ` (${hub.lastCount} sessioni)` : ""}${
+          hubFailing ? ` · ultimo tentativo fallito ${fmtWhen(hub.lastErrAt)}: ${hub.lastErr}` : ""
+        }`;
+
   const day = PROGRAM[dayIdx];
 
   /* ---------- caricamento iniziale + migrazione dalla V3 ---------- */
@@ -1401,6 +1636,7 @@ export default function SchedaV4() {
     if (res.ok) {
       lastPayloadRef.current = payload;
       readBackups().then(setBackups);
+      setTimeout(() => hubSync(false, list), 1500);
       setSaveState({ status: "saved", message: `Salvato alle ${new Date().toLocaleTimeString("it-IT")}` });
       storageWriteVerified(DRAFT_KEY, JSON.stringify({}), 1);
       return true;
@@ -1594,6 +1830,21 @@ export default function SchedaV4() {
               >
                 Schermo {wakeOn ? "acceso" : "auto"}
               </button>
+              {hub.url && (
+                <button
+                  onClick={() => setView("dati")}
+                  title={"Backup sul PC: " + hubLabel}
+                  className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-medium ${
+                    hubTone === "green"
+                      ? "border-emerald-300 text-emerald-700"
+                      : hubTone === "amber"
+                      ? "border-amber-300 bg-amber-50 text-amber-800"
+                      : "border-stone-300 text-stone-500"
+                  }`}
+                >
+                  PC {hub.busy ? "…" : hubTone === "green" ? "✓" : hubTone === "amber" ? "!" : "·"}
+                </button>
+              )}
               {savedBadge()}
             </div>
           </div>
@@ -1781,6 +2032,57 @@ export default function SchedaV4() {
         {/* ---------------- DATI ---------------- */}
         {loaded && view === "dati" && (
           <div className="space-y-3">
+            <div className="rounded-xl border border-teal-200 bg-white p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold">Backup automatico sul PC</h3>
+                <Badge tone={hubTone}>{hubLabel}</Badge>
+              </div>
+              <p className="mb-2 text-xs text-stone-500">
+                Dopo ogni salvataggio l'app invia una copia dell'archivio al PC di casa tramite Tailscale. Se il PC non
+                risponde riprova da sola alla prossima apertura. Le copie finiscono in{" "}
+                <em>Personal Trainer/backup-scheda-v4</em> su OneDrive.
+              </p>
+              <label htmlFor="hubUrl" className="mb-1 block text-xs font-semibold text-stone-600">
+                Indirizzo del PC
+              </label>
+              <input
+                id="hubUrl"
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                spellCheck={false}
+                value={hubUrlInput}
+                onChange={(e) => setHubUrlInput(e.target.value)}
+                placeholder="https://nome-pc.xxxx.ts.net:8443"
+                className="w-full rounded-lg border border-stone-300 px-3 py-2 text-xs"
+              />
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  onClick={saveHubUrl}
+                  disabled={hub.busy}
+                  className="rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                >
+                  Salva e prova
+                </button>
+                <button
+                  onClick={() => hubSync(true)}
+                  disabled={hub.busy || !hub.url}
+                  className="rounded-lg border border-stone-300 px-3 py-2 text-xs font-semibold text-stone-700 disabled:opacity-50"
+                >
+                  Invia backup ora
+                </button>
+                <button
+                  onClick={restoreFromPc}
+                  disabled={hub.busy || !hub.url}
+                  className="rounded-lg border border-teal-300 px-3 py-2 text-xs font-semibold text-teal-800 disabled:opacity-50"
+                >
+                  Recupera dal PC
+                </button>
+              </div>
+              <p role="status" className="mt-2 text-xs text-stone-600">
+                {hubStatusText}
+              </p>
+            </div>
             <div className="rounded-xl border border-stone-200 bg-white p-3">
               <h3 className="mb-2 text-sm font-bold">Esporta (fallo dopo ogni sessione)</h3>
               <div className="flex flex-wrap gap-2">

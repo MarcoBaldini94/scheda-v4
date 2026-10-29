@@ -1,6 +1,6 @@
 {
   "name": "scheda-v4-pwa",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "private": true,
   "scripts": {
     "build": "esbuild src/main.jsx --bundle --minify --format=iife --target=es2018 --define:process.env.NODE_ENV=\\\"production\\\" --outfile=dist/app.js && tailwindcss -i src/input.css -o dist/styles.css --minify"

@@ -26,7 +26,15 @@ Apri l'indirizzo con Chrome → menu ⋮ → *Installa app*. Poi disinstalla o t
 ## Aggiornamenti futuri
 Rigenera con `npm install && npm run build` (dentro `sorgenti/`), copia `dist/app.js` e `dist/styles.css` insieme ai file di `public/`, **cambia la stringa `CACHE` in `sw.js`** (es. `scheda-v4-4.0.1`) e ricarica i file su GitHub con gli stessi nomi. Lo storico non viene toccato.
 
+## Backup automatico sul PC (dalla 4.1.0)
+Dopo ogni salvataggio l'app manda una copia dell'archivio all'**Hub web app** su PC2, tramite Tailscale. L'hub la scrive come file nuovo (`scheda-v4-AAAA-MM-GG_hhmmss.json`, mai sovrascritto, ultimi 200) in `Personal Trainer/backup-scheda-v4` su OneDrive, **fuori dal repository**: lo storico non finisce mai su GitHub.
+- **Attivazione:** Dati → *Backup automatico sul PC* → indirizzo `https://<pc2>.<tailnet>.ts.net:8443` → *Salva e prova*. L'indirizzo è lo stesso dell'app Guadagni e viene condiviso: se l'hai già impostato lì, qui compare da solo.
+- **Quando invia:** dopo ogni salvataggio, all'apertura dell'app e quando torna la rete; solo se l'archivio è cambiato dall'ultimo invio riuscito.
+- **Spia nell'header:** `PC ✓` ultimo invio riuscito, `PC !` PC non raggiungibile (riprova da sola), `PC …` invio in corso.
+- **Telefono nuovo:** Dati → *Recupera dal PC* unisce l'ultimo backup all'archivio (niente duplicati, niente cancellato).
+- **Requisiti:** Tailscale acceso sul telefono; l'app `scheda-v4` registrata in `Hub web app/hub_config.json` e hub riavviato su PC2.
+
 ## Limiti
-- I dati restano solo su questo dispositivo e in questo browser: esporta il JSON dopo ogni seduta.
+- Senza backup sul PC attivo i dati restano solo su questo dispositivo e in questo browser: in quel caso esporta il JSON dopo ogni seduta.
 - Cancellare i dati dei siti in Chrome cancella l'archivio (compresi i backup automatici).
 - La sveglia di fine recupero richiede app in primo piano e schermo acceso.
